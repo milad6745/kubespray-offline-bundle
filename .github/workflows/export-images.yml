@@ -1,0 +1,66 @@
+name: Export Kubespray images individually
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.build.outputs.images }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build matrix from images.list
+        id: build
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, re
+          from pathlib import Path
+          images = [s.strip() for s in Path('images.list').read_text().splitlines()
+                    if s.strip() and not s.lstrip().startswith('#')]
+          if not images:
+              raise SystemExit('images.list is empty')
+          if len(images) != len(set(images)):
+              raise SystemExit('images.list contains duplicate entries')
+          jobs = []
+          for i, image in enumerate(images, 1):
+              name = re.sub(r'[^A-Za-z0-9_.-]+', '_', image)
+              jobs.append({'image': image, 'name': f'{i:03d}_{name}'})
+          print('images=' + json.dumps(jobs, separators=(',', ':')))
+          PY
+
+  export:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.images) }}
+    steps:
+      - name: Pull image and export individual tar
+        shell: bash
+        env:
+          IMAGE: ${{ matrix.image }}
+          FILE_NAME: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 "$IMAGE"
+          mkdir -p export
+          docker save -o "export/${FILE_NAME}.tar" "$IMAGE"
+          printf '%s\n' "$IMAGE" > "export/${FILE_NAME}.image.txt"
+          ls -lh "export/${FILE_NAME}.tar"
+
+      - name: Upload image as separate GitHub Actions Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.name }}
+          path: export/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
